@@ -69,9 +69,22 @@ function qrUrl(id){let u=new URL(location.href);u.search='';u.hash='';u.searchPa
 function renderTeams(){$('teamCards').innerHTML=TEAMS.map(t=>{let url=qrUrl(t.id),qr='https://api.qrserver.com/v1/create-qr-code/?size=220x220&margin=8&data='+encodeURIComponent(url);return `<article class="teamcard" data-team="${t.id}" style="border-top:3px solid ${t.color}"><div class="eyebrow" style="color:${t.color}">TEAM 0${t.id} · ${t.pos}</div><h3>${t.name}</h3><p>Scan to join your team's briefing and await the launch.</p><div class="qrrow"><div class="qr"><img loading="lazy" src="${qr}" alt="QR for ${t.name}"></div><div><div class="linktext">${esc(url)}</div><div class="row"><button class="btn secondary" data-copy="${t.id}">COPY LINK</button><button class="btn" data-open="${t.id}">OPEN NODE</button></div></div></div></article>`}).join('');document.querySelectorAll('[data-copy]').forEach(b=>b.onclick=async()=>{try{await navigator.clipboard.writeText(qrUrl(+b.dataset.copy));b.textContent='COPIED'}catch{alert(qrUrl(+b.dataset.copy))}});document.querySelectorAll('[data-open]').forEach(b=>b.onclick=()=>{setTeam(+b.dataset.open);showPage('page2')})}
 function renderQuestions(){document.body.dataset.level=String(level+1);$('levelBadge').textContent=`LEVEL 0${level+1} / 05`;$('progressTitle').textContent=['Level 1: Signal Analysis','Level 2: Wellbeing Under Pressure','Level 3: Equipment in Context','Level 4: Quantitative Reasoning','Level 5: WHO Final Protocol'][level];$('progressCount').textContent=`${teamDoneCount()} / 12 COMPLETE`;$('progressFill').style.width=teamDoneCount()/12*100+'%';$('progressSub').textContent=level===4?'Clear all four final questions, then enter the four-digit escape code.':'Answer both questions correctly to enter the next level.';$('questionArea').innerHTML=BANK[String(teamId)][level].map((q,qi)=>{let key=`${level}-${qi}`,ok=!!done[teamId]?.[key],picked=answers[teamId]?.[key];return `<article class="question"><div class="qnum">LEVEL 0${level+1} · QUESTION 0${qi+1} ${ok?'· CLEARED':''}</div><h3>${esc(q.q)}</h3><div class="choices">${q.opts.map((opt,oi)=>`<button class="choice ${ok&&oi===picked?'selected correct':''}" data-level="${level}" data-qi="${qi}" data-opt="${oi}" ${ok?'disabled':''}>${'ABCD'[oi]}. ${esc(opt)}</button>`).join('')}</div><div class="feedback ${ok?'good':''}" id="fb-${key}">${ok?'✓ Correct. '+esc(q.why):''}</div></article>`}).join('');$('finalPanel').classList.toggle('hidden',level!==4||teamDoneCount()<12);if(level===4&&teamDoneCount()===12&&!finished&&!escapeShown)showEscapeModal();}
 function showLevel(n){level=n;renderQuestions();showPage('page3')}
-function wrong(fb){if(cooldown)return;cooldown=true;let left=7;$('pauseCount').textContent=left;$('pauseScreen').classList.add('show');if(fb){fb.textContent='Incorrect. Review your answer and try again.';fb.className='feedback'}coolTimer=setInterval(()=>{left--;$('pauseCount').textContent=left;if(left<=0){clearInterval(coolTimer);cooldown=false;$('pauseScreen').classList.remove('show');renderQuestions()}},1000)}
-async function submitAnswer(l,qi,oi){if(!serverMode){done[teamId]??={};answers[teamId]??={};done[teamId][`${l}-${qi}`]=true;answers[teamId][`${l}-${qi}`]=oi;return true}let r=await fetch('/api/answer',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({teamId,level:l,question:qi,option:oi})}),d=await r.json();if(!r.ok||!d.ok)throw Error(d.error||'Unable to save answer');return d.correct}
-$('questionArea').addEventListener('click',async e=>{let b=e.target.closest('.choice');if(!b||b.disabled||cooldown||finished)return;let l=+b.dataset.level,qi=+b.dataset.qi,oi=+b.dataset.opt,q=BANK[String(teamId)][l][qi],fb=$(`fb-${l}-${qi}`);if(oi!==q.a){b.classList.add('wrong');wrong(fb);return}b.disabled=true;try{let ok=await submitAnswer(l,qi,oi);if(!ok){wrong(fb);return}done[teamId]??={};answers[teamId]??={};done[teamId][`${l}-${qi}`]=true;answers[teamId][`${l}-${qi}`]=oi;renderQuestions();renderAdminStats();if(l<4&&BANK[String(teamId)][l].every((_,i)=>done[teamId]?.[`${l}-${i}`]))setTimeout(()=>{if(level===l&&!finished)showLevel(l+1)},550)}catch(err){b.disabled=false;fb.textContent=err.message}});
+let cooldownUntil=0;
+function updateCooldown(until){
+ cooldownUntil=Math.max(0,Number(until)||0);
+ if(coolTimer){clearInterval(coolTimer);coolTimer=null}
+ const tick=()=>{
+  let remaining=Math.max(0,Math.ceil((cooldownUntil-Date.now())/1000));
+  cooldown=remaining>0;
+  $('pauseCount').textContent=remaining;
+  $('pauseScreen').classList.toggle('show',cooldown && $('page3').classList.contains('active') && !finished);
+  if(!cooldown){clearInterval(coolTimer);coolTimer=null}
+ };
+ tick();if(cooldown)coolTimer=setInterval(tick,150);
+}
+function wrong(fb,until){if(fb){fb.textContent='Incorrect. Your whole team is paused for 7 seconds.';fb.className='feedback'}updateCooldown(until||Date.now()+7000)}
+async function submitAnswer(l,qi,oi){if(!serverMode){done[teamId]??={};answers[teamId]??={};done[teamId][`${l}-${qi}`]=true;answers[teamId][`${l}-${qi}`]=oi;return true}let r=await fetch('/api/answer',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({teamId,level:l,question:qi,option:oi})}),d=await r.json();if(r.status===429){updateCooldown(d.cooldownUntil);return false}if(!r.ok||!d.ok)throw Error(d.error||'Unable to save answer');if(!d.correct)wrong(null,d.cooldownUntil);return d.correct}
+$('questionArea').addEventListener('click',async e=>{let b=e.target.closest('.choice');if(!b||b.disabled||cooldown||finished)return;let l=+b.dataset.level,qi=+b.dataset.qi,oi=+b.dataset.opt,q=BANK[String(teamId)][l][qi],fb=$(`fb-${l}-${qi}`);b.disabled=true;try{let ok=await submitAnswer(l,qi,oi);if(!ok){b.disabled=false;fb.textContent='Incorrect response or team cooldown active.';return}done[teamId]??={};answers[teamId]??={};done[teamId][`${l}-${qi}`]=true;answers[teamId][`${l}-${qi}`]=oi;renderQuestions();renderAdminStats();if(l<4&&BANK[String(teamId)][l].every((_,i)=>done[teamId]?.[`${l}-${i}`]))setTimeout(()=>{if(level===l&&!finished)showLevel(l+1)},550)}catch(err){b.disabled=false;fb.textContent=err.message}});
 function showEscapeModal(){escapeShown=true;$('escapeOverlay').classList.remove('hidden')}
 function hideEscapeModal(){$('escapeOverlay').classList.add('hidden')}
 function showPreview(){let list=BANK[String(teamId)][4];$('answerPreview').innerHTML=list.map((q,i)=>{let picked=answers[teamId]?.[`4-${i}`];return `<div class="review-card"><b>QUESTION ${i+1}: ${esc(q.q)}</b><ol type="A">${q.opts.map((opt,j)=>`<li class="${j===picked?'picked':''}">${esc(opt)} ${j===picked?'✓ YOUR CORRECT SELECTION':''}</li>`).join('')}</ol><div class="answer-hint">Option number = A:1 · B:2 · C:3 · D:4</div></div>`}).join('');$('answerPreview').classList.remove('hidden');hideEscapeModal();$('finalPanel').scrollIntoView({behavior:'smooth',block:'center'})}
@@ -103,6 +116,7 @@ async function syncState(){
   if(initialTeam){
    const me=s.teams?.[teamId];
    if(me){
+    if(Number(me.cooldownUntil||0)!==cooldownUntil)updateCooldown(me.cooldownUntil);
     done[teamId]=me.done||{};
     answers[teamId]=me.answers||{};
     if(me.finishedAt){
@@ -128,6 +142,6 @@ async function syncState(){
  }catch(e){serverMode=false;$('connectionStatus').textContent='Server unavailable · Waiting for connection'}
 }
 
-function init(){renderTeams();setTeam(teamId);renderAdminStats();if(initialTeam){$('returnHome').classList.add('hidden');showPage('page2',false)}else if(pageParam==='admin')showPage('adminPage',false);syncState();setInterval(syncState,2500)}
+function init(){document.querySelector('main.wrap').append($('rankPage'),$('adminPage'));renderTeams();setTeam(teamId);renderAdminStats();if(initialTeam){$('returnHome').classList.add('hidden');showPage('page2',false)}else if(pageParam==='admin')showPage('adminPage',false);syncState();setInterval(syncState,2500)}
 init();
 </script></body></html>
