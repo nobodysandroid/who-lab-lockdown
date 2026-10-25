@@ -11,6 +11,7 @@ app.use(express.static(path.join(__dirname,'public')));
 const ADMIN_PASSWORD=process.env.ADMIN_PASSWORD;
 const SAVE_FILE=process.env.GAME_STATE_FILE||''; // Set to persistent disk path if hosting supports it.
 const empty=()=>({started:false,startedAt:null,updatedAt:Date.now(),teams:{},rankings:[]});
+const COOLDOWN_MS=7000;
 let game=empty();
 try{if(SAVE_FILE&&fs.existsSync(SAVE_FILE))game=JSON.parse(fs.readFileSync(SAVE_FILE,'utf8'))}catch(e){console.warn('Could not load saved game',e.message)}
 const persist=()=>{if(SAVE_FILE){try{fs.mkdirSync(path.dirname(SAVE_FILE),{recursive:true});fs.writeFileSync(SAVE_FILE,JSON.stringify(game))}catch(e){console.warn('Could not persist game:',e.message)}}};
@@ -26,13 +27,14 @@ app.post('/api/answer',(req,res)=>{
  const teamId=Number(req.body?.teamId),level=Number(req.body?.level),question=Number(req.body?.question),option=Number(req.body?.option);
  if(!validTeam(teamId)||!Number.isInteger(level)||level<0||level>4||!Number.isInteger(question)||!Number.isInteger(option)||option<0||option>3)return res.status(400).json({ok:false,error:'Invalid question'});
  const q=BANK[String(teamId)]?.[level]?.[question];if(!q)return res.status(400).json({ok:false,error:'Unknown question'});
- let t=game.teams[teamId]||(game.teams[teamId]={done:{},answers:{},count:0,finishedAt:null});
+ let t=game.teams[teamId]||(game.teams[teamId]={done:{},answers:{},count:0,finishedAt:null,cooldownUntil:0});
+ if((t.cooldownUntil||0)>Date.now())return res.status(429).json({ok:false,error:'Team cooldown active',cooldownUntil:t.cooldownUntil});
  if(t.finishedAt||game.rankings.length>=3)return res.status(409).json({ok:false,error:'The podium has been finalized'});
  const key=`${level}-${question}`;
  if(t.done[key])return res.json({ok:true,correct:true,count:t.count});
  // Enforce sequential levels to prevent skipping the puzzle path.
  for(let l=0;l<level;l++)for(let i=0;i<BANK[String(teamId)][l].length;i++)if(!t.done[`${l}-${i}`])return res.status(409).json({ok:false,error:'Finish earlier levels first'});
- if(option!==q.a)return res.json({ok:true,correct:false});
+ if(option!==q.a){t.cooldownUntil=Date.now()+COOLDOWN_MS;broadcast();return res.json({ok:true,correct:false,cooldownUntil:t.cooldownUntil});}
  t.done[key]=true;t.answers[key]=option;t.count=Object.keys(t.done).length;broadcast();res.json({ok:true,correct:true,count:t.count});
 });
 app.post('/api/finish',(req,res)=>{
